@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Real-Time GPS Tracker</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <style>
+        #map {
+            height: 100vh;
+        }
+        .device-list {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+            z-index: 1000;
+        }
+        .device {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div class="device-list">
+        <h3>Connected Devices</h3>
+        <div id="devices"></div>
+    </div>
+   
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <!-- MQTT over WebSockets -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script>
+        // Init Map
+        var map = L.map('map').setView([12.90, 77.60], 15); // Default center
+        console.log("Map initialized");
+       
+        // Add OpenStreetMap Tile Layer
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+        console.log("Map tiles added");
+       
+        // Track markers by device ID
+        var markers = {};
+        var deviceInfo = {};
+        var lastUpdated = {};
+       
+        // Update the device list in the UI
+        function updateDeviceList() {
+            const deviceList = document.getElementById('devices');
+            deviceList.innerHTML = '';
+           
+            Object.keys(deviceInfo).forEach(device => {
+                const deviceDiv = document.createElement('div');
+                deviceDiv.className = 'device';
+               
+                const lastUpdate = new Date(lastUpdated[device]);
+                const formattedTime = lastUpdate.toLocaleTimeString();
+               
+                deviceDiv.innerHTML = `
+                    <strong>${device}</strong><br>
+                    Lat: ${deviceInfo[device].lat.toFixed(6)}<br>
+                    Lon: ${deviceInfo[device].lon.toFixed(6)}<br>
+                    Updated: ${formattedTime}
+                `;
+               
+                // Add click handler to focus on this device
+                deviceDiv.addEventListener('click', () => {
+                    map.setView([deviceInfo[device].lat, deviceInfo[device].lon], 17);
+                    markers[device].openPopup();
+                });
+               
+                deviceList.appendChild(deviceDiv);
+            });
+        }
+       
+        // MQTT Connection
+        console.log("Attempting to connect to MQTT broker via WebSocket...");
+        const client = mqtt.connect('ws://192.168.16.254:9002', {
+            reconnectPeriod: 1000,
+            connectTimeout: 30000,
+            clientId: 'dashboard_' + Math.random().toString(16).substr(2, 8)
+        });
+       
+        client.on('connect', () => {
+            console.log('Connected to MQTT broker successfully');
+            client.subscribe('gps/phones', (err) => {
+                if (!err) {
+                    console.log('Successfully subscribed to gps/phones topic');
+                } else {
+                    console.error('Failed to subscribe:', err);
+                }
+            });
+        });
+       
+        client.on('reconnect', () => {
+            console.log('Attempting to reconnect to MQTT broker...');
+        });
+       
+        client.on('error', (error) => {
+            console.error('Connection error:', error);
+        });
+       
+        client.on('message', (topic, message) => {
+            console.log(`Received message on topic ${topic}: ${message.toString()}`);
+            try {
+                const data = JSON.parse(message.toString());
+                const deviceId = data.device;
+                const lat = data.latitude;
+                const lon = data.longitude;
+               
+                console.log(`Processing GPS Data for ${deviceId}: ${lat}, ${lon}`);
+               
+                // Store device info
+                deviceInfo[deviceId] = { lat, lon };
+                lastUpdated[deviceId] = new Date();
+               
+                // Update or create marker for this device
+                if (markers[deviceId]) {
+                    console.log(`Updating marker for ${deviceId}`);
+                    markers[deviceId].setLatLng([lat, lon]);
+                    markers[deviceId].getPopup().setContent(`
+                        <strong>${deviceId}</strong><br>
+                        Latitude: ${lat}<br>
+                        Longitude: ${lon}
+                    `);
+                } else {
+                    console.log(`Creating new marker for ${deviceId}`);
+                    // Use different icons for different devices
+                    const markerIcon = L.divIcon({
+                        html: `<div style="background-color: ${stringToColor(deviceId)}; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white;"></div>`,
+                        className: 'device-marker',
+                        iconSize: [20, 20]
+                    });
+                   
+                    markers[deviceId] = L.marker([lat, lon], { icon: markerIcon })
+                        .addTo(map)
+                        .bindPopup(`
+                            <strong>${deviceId}</strong><br>
+                            Latitude: ${lat}<br>
+                            Longitude: ${lon}
+                        `)
+                        .openPopup();
+                }
+               
+                // Update device list
+                updateDeviceList();
+               
+                // Auto-fit all markers on the map
+                if (Object.keys(markers).length > 1) {
+                    const points = Object.values(markers).map(marker => marker.getLatLng());
+                    map.fitBounds(L.latLngBounds(points), { padding: [50, 50] });
+                } else {
+                    map.setView([lat, lon], 15);
+                }
+               
+            } catch (e) {
+                console.error('Error processing message:', e);
+            }
+        });
+       
+        // Helper function to generate consistent colors for device markers
+        function stringToColor(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = str.charCodeAt(i) + ((hash << 5) - hash);
+            }
+            let color = '#';
+            for (let i = 0; i < 3; i++) {
+                const value = (hash >> (i * 8)) & 0xFF;
+                color += ('00' + value.toString(16)).substr(-2);
+            }
+            return color;
+        }
+    </script>
+</body>
+</html>
